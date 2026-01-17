@@ -9,8 +9,12 @@ load_dotenv()
 API_KEY = os.getenv('DERIBIT_API_KEY')
 API_SECRET = os.getenv('DERIBIT_API_SECRET')
 SYMBOL = 'BTC-PERPETUAL'
-POSITION_SIZE = 10000
-SPREAD = 0.0005
+
+# CONFIGURATION
+POSITION_SIZE = 1000
+SPREAD = 0.0002 # 0.02% spread
+MAX_INVENTORY = 50000
+SKEW_FACTOR = 0.00005 # how aggresively we move price per $1 of inventory 
 
 async def run_bot():
     if not API_KEY or not API_SECRET:
@@ -33,31 +37,53 @@ async def run_bot():
             # cancel all existing orders
             await exchange.cancel_all_orders(SYMBOL)
 
-            # get real time price
+            # fetch market data and position
             ticker = await exchange.fetch_ticker(SYMBOL)
+            balance = await exchange.fetch_balance()
+
+            # get current invnetory in USDT
+            positions = await exchange.fetch_positions([SYMBOL])
+            current_inventory = 0
+            if len(positions) > 0: 
+                current_inventory = positions[0]['contracts']
+
             best_bid = ticker['bid']
             best_ask = ticker['ask']
             mid_price = (best_bid + best_ask) / 2
 
-            # calculate our prices
-            my_bid_price = mid_price * (1 - SPREAD)
-            my_ask_price = mid_price * (1 + SPREAD)
+            # calculate skew --> skew = inventory * skew factor
 
-            print(f"Stats: Market Mid: {mid_price:.2f} | My Spread: {(my_ask_price - my_bid_price):.2f}")
+            price_skew = current_inventory * SKEW_FACTOR
 
+            # calculate skewed quotes
+            target_bid = mid_price * (1 - SPREAD) - price_skew
+            target_ask = mid_price * (1 + SPREAD) - price_skew
+
+            print(f"Inv: {current_inventory} | Mid: {mid_price:.2f} | Skew: {price_skew:.2f}")
+            print(f"Qt: Bid {target_bid:.2f} | Ask {target_ask:.2f}")
+
+            # risk checks
             params = {'postOnly': True}
+            orders_to_place = []
 
-            # use asyncio.gather to send both orders at the exact same time
-            try:
-                await asyncio.gather(
-                    exchange.create_limit_buy_order(SYMBOL, POSITION_SIZE, my_bid_price, params),
-                    exchange.create_limit_sell_order(SYMBOL, POSITION_SIZE, my_ask_price, params)
-                )
-                print(f" -> ORDERS PLACED: Buy @ {my_bid_price:.2f} | Sell @ {my_ask_price:.2f}")
-            except Exception as e:
-                print(f" -> Order failed: {e}")
+            # only buy if not max long
+            if current_inventory < MAX_INVENTORY:
+                orders_to_place.append(exchange.create_limit_buy_order(SYMBOL, POSITION_SIZE, target_bid, params))
+            else:
+                print("Max long inventory! Stopping buys now.")
+            
+            # only sell if not max short
+            if current_inventory > -MAX_INVENTORY:
+                orders_to_place.append(exchange.create_limit_sell_order(SYMBOL, POSITION_SIZE, target_ask, params))
+            else:
+                print("Max short inventory! Stopping sells now.")
 
-            print("-" * 30)
+            # execute safe orders
+            if orders_to_place:
+                try:
+                    await asyncio.gather(*orders_to_place) # unpack list
+                except Exception as e:
+                    print(f"Order error: {e}")
 
             await asyncio.sleep(5)
 
