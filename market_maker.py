@@ -1,6 +1,7 @@
 import asyncio
 import ccxt.async_support as ccxt
 import os
+import sqlite3
 from dotenv import load_dotenv
 
 # load key and secrets
@@ -14,7 +15,74 @@ SYMBOL = 'BTC-PERPETUAL'
 POSITION_SIZE = 1000
 SPREAD = 0.0002 # 0.02% spread
 MAX_INVENTORY = 50000
-SKEW_FACTOR = 0.00005 # how aggresively we move price per $1 of inventory 
+SKEW_FACTOR = 0.00005 # how aggresively we move price per $1 of inventory
+DB_FILE = 'trading_data.db'
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    # create trades table
+    # id primary key to prevent duplicate entries
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS trades (
+        id TEXT PRIMARY KEY,
+        timestamp INTEGER,
+        symbol TEXT
+        side TEXT,
+        price REAL, 
+        amount REAL, 
+        fee REAL, 
+        liquidity TEXT
+    )
+''')
+
+    conn.commit()
+    conn.close()
+    print(f"----- Database '{DB_FILE}' initialized -----")
+
+async def log_new_trades(exchange, symbol):
+    since_time = exchange.milliseconds() - (60 * 60 * 1000)
+
+    try: 
+        trades = await exchange.fetch_my_trades(symbol, since=since_time, limit=50)
+
+        if trades:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            new_count = 0
+
+            for trade in trades:
+                # Extract clean data
+                trade_data = (
+                    trade['id'],          # unique Deribit Trade ID
+                    trade['timestamp'],
+                    trade['symbol'],
+                    trade['side'],        # buy or sell
+                    trade['price'],
+                    trade['amount'],
+                    trade['fee']['cost'] if trade['fee'] else 0,
+                    trade['takerOrMaker'] # 'maker' (rebate) or 'taker' (fee)
+                )
+
+                # INSERT OR IGNORE --> skip the trade if trade ID already exists
+                cursor.execute('''
+                    INSERT OR IGNORE INTO trades
+                    (id, timestamp, symbol, side, price, amount, fee, liquidity)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ''', trade_data)
+
+                if cursor.rowcount > 0:
+                    new_count += 1
+
+            conn.commit()
+            conn.close()
+
+            if new_count > 0:
+                print(f"Logged {new_count} new trade(s) to DB")
+
+    except Exception as e:
+            print(f"Logging error: {e}")
 
 async def run_bot():
     if not API_KEY or not API_SECRET:
@@ -24,7 +92,10 @@ async def run_bot():
     print(f"--- Starting market maker on {SYMBOL} ---")
     print("Press Ctrl+C to stop.")
 
-    # Initialize exchange
+    # initialize database
+    init_db()
+
+    # initialize exchange
     exchange = ccxt.deribit({
         'apiKey': API_KEY,
         'secret': API_SECRET,
@@ -41,7 +112,7 @@ async def run_bot():
             ticker = await exchange.fetch_ticker(SYMBOL)
             balance = await exchange.fetch_balance()
 
-            # get current invnetory in USDT
+            # get current inventory in USDT
             positions = await exchange.fetch_positions([SYMBOL])
             current_inventory = 0
             if len(positions) > 0: 
@@ -86,6 +157,7 @@ async def run_bot():
                     print(f"Order error: {e}")
 
             await asyncio.sleep(5)
+            await log_new_trades(exchange, SYMBOL)
 
     except KeyboardInterrupt:
         print("\nStopping bot gracefully...")

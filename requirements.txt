@@ -1,3 +1,5 @@
 ccxt
 asyncio
 python-dotenv
+pandas
+matplotlib
