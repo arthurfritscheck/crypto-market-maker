@@ -3,6 +3,8 @@ import ccxt.async_support as ccxt
 import os
 import sqlite3
 from dotenv import load_dotenv
+import time
+
 
 # load key and secrets
 load_dotenv()
@@ -105,11 +107,17 @@ async def run_bot():
 
     try:
         while True: 
+
+
             # cancel all existing orders
             await exchange.cancel_all_orders(SYMBOL)
 
-            # fetch market data and position
+            # fetch market data
             ticker = await exchange.fetch_ticker(SYMBOL)
+
+            # latency tracking
+            start_time = time.perf_counter()
+
             balance = await exchange.fetch_balance()
 
             # get current inventory in USDT
@@ -155,6 +163,11 @@ async def run_bot():
                     await asyncio.gather(*orders_to_place) # unpack list
                 except Exception as e:
                     print(f"Order error: {e}")
+            
+            # stop latency timer
+            end_time = time.perf_counter()
+            latency_ms = (end_time - start_time) * 1000 # conver to ms
+            print(f"Tick to order latency: {latency_ms:.2f} ms")
 
             await asyncio.sleep(5)
             await log_new_trades(exchange, SYMBOL)
