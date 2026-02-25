@@ -209,3 +209,5 @@ __marimo__/
 config.py
 .env
 secrets.py
+*.db
+market_maker.py
