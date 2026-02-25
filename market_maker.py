@@ -30,7 +30,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS trades (
         id TEXT PRIMARY KEY,
         timestamp INTEGER,
-        symbol TEXT
+        symbol TEXT,
         side TEXT,
         price REAL, 
         amount REAL, 
