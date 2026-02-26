@@ -144,8 +144,10 @@ class ExecutionEngine:
                     print(f"Inv: {self.current_inventory} | Mid: {mid_price:.2f} | Skew: {price_skew:.2f}")
                     print(f"Qt: Bid {target_bid:.2f} | Ask {target_ask:.2f}")
 
-                    await self.exchange.cancel_all_orders(self.strategy.symbol)
-                    await self.execute_quotes(target_bid, target_ask)
+                    await asyncio.gather(
+                        self.exchange.cancel_all_orders(self.strategy.symbol),
+                        self.execute_quotes(target_bid, target_ask)
+                    )
 
                     self.last_mid_price = mid_price
                     print(f"Execution Latency: {(time.perf_counter() - start_time) * 1000:.2f} ms")
