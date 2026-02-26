@@ -19,6 +19,7 @@ class ExecutionEngine:
         # state management
         self.last_mid_price = 0.0
         self.current_inventory = 0
+        self.base_currency = self.strategy.symbol.split('-')[0] # splits 'BTC-PERPETUAL' into ['BTC', 'PERPETUAL'] and grabs the first part
 
         # PnL trackers
         self.initial_equity = None
@@ -48,33 +49,51 @@ class ExecutionEngine:
             except Exception as e:
                 print(f"[DB ERROR] Logging error: {e}")
 
-    async def update_inventory(self):
-        try:
-            # fetch current position (inventory)
-            positions = await self.exchange.fetch_positions([self.strategy.symbol])
-            self.base_currency = self.strategy.symbol.split('-')[0] # splits 'BTC-PERPETUAL' into ['BTC', 'PERPETUAL'] and grabs the first part
-            
-            if len(positions) > 0:
-                self.current_inventory = positions[0]['contracts'] if len(positions) > 0 else 0
-                self.unrealized_pnl = positions[0].get('unrealizedPnl', 0.0)
-            else:
-                self.current_inventory = 0
-                self.unrealized_pnl = 0.0
+    async def watch_fills_background_task(self):
+        "Updates inventory in real-time whenever a fill is detected"
+        while True:
+            try:
+                trades = await self.exchange.watch_my_trades(self.strategy.symbol)
 
-            # fetch account Balance (PnL)
-            balance = await self.exchange.fetch_balance()
-            if self.base_currency in balance:
-                current_total_equity = balance[self.base_currency]['total']
-                
-                if self.initial_equity is None:
-                    self.initial_equity = current_total_equity
-
-                self.cumulative_pnl = current_total_equity - self.initial_equity
-            else:
-                self.cumulative_pnl = 0.0
+                for trade in trades:
+                    if trade['side'] == 'buy':
+                        self.current_inventory += trade['amount']
+                    else:
+                        self.current_inventory -= trade['amount']
+                    
+                    print(f"[FILL] {trade['side'].upper()} {trade['amount']} @ {trade['price']} | New inventory: {self.current_inventory}")
         
-        except Exception as e:
-            print(f"[API ERROR] failed to fetch inventory/balance: {e}")
+            except Exception as e:
+                print(f"[FILLS ERROR] {e}")
+                await asyncio.sleep(1)
+
+    async def update_inventory_background_task(self):
+        """Reconciles inventory with exchange every 5 seconds as fallback""" # in case of missed fills, partial fills, starting state with open position from previous sessions
+        while True:
+            await asyncio.sleep(5)
+            try:
+                # fetch current position (inventory)
+                positions = await self.exchange.fetch_positions([self.strategy.symbol])
+                
+                if len(positions) > 0:
+                    self.current_inventory = positions[0]['contracts'] if len(positions) > 0 else 0
+                    self.unrealized_pnl = positions[0].get('unrealizedPnl', 0.0)
+                else:
+                    self.current_inventory = 0
+                    self.unrealized_pnl = 0.0
+
+                # fetch account balance (PnL)
+                balance = await self.exchange.fetch_balance()
+                if self.base_currency in balance:
+                    current_total_equity = balance[self.base_currency]['total']
+                    if self.initial_equity is None:
+                        self.initial_equity = current_total_equity
+                    self.cumulative_pnl = current_total_equity - self.initial_equity
+                else:
+                    self.cumulative_pnl = 0.0
+            
+            except Exception as e:
+                print(f"[API ERROR] failed to fetch inventory/balance: {e}")
 
     async def execute_quotes(self, target_bid, target_ask):
         params = {'postOnly': True}
@@ -100,6 +119,8 @@ class ExecutionEngine:
         print(f"--- Starting Engine on {self.strategy.symbol} ---")
         self.db.init_db()
         asyncio.create_task(self.log_trades_background_task())
+        asyncio.create_task(self.watch_fills_background_task())
+        asyncio.create_task(self.update_inventory_background_task())
 
         try:
             await self.exchange.cancel_all_orders(self.strategy.symbol)
@@ -110,8 +131,6 @@ class ExecutionEngine:
 
                 if abs(mid_price - self.last_mid_price) >= self.strategy.price_update_threshold:
                     start_time = time.perf_counter()
-                    
-                    await self.update_inventory()
 
                     # ask the Strategy module for the quotes
                     target_bid, target_ask, price_skew = self.strategy.calculate_quotes(self.current_inventory, mid_price)
