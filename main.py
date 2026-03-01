@@ -20,6 +20,7 @@ class ExecutionEngine:
         self.last_mid_price = 0.0
         self.current_inventory = 0
         self.base_currency = self.strategy.symbol.split('-')[0] # splits 'BTC-PERPETUAL' into ['BTC', 'PERPETUAL'] and grabs the first part
+        self.last_update_time = 0.0
 
         # PnL trackers
         self.initial_equity = None
@@ -38,7 +39,7 @@ class ExecutionEngine:
         while True:
             try:
                 await asyncio.sleep(30)
-                since_time = self.exchange.milliseconds() - (60 * 60 * 1000)
+                since_time = self.exchange.milliseconds() - (10 * 60 * 1000)
                 trades = await self.exchange.fetch_my_trades(self.strategy.symbol, since=since_time, limit=50)
                 
                 # pass the raw data to the database module
@@ -60,7 +61,6 @@ class ExecutionEngine:
                         self.current_inventory += trade['amount']
                     else:
                         self.current_inventory -= trade['amount']
-                    
                     print(f"[FILL] {trade['side'].upper()} {trade['amount']} @ {trade['price']} | New inventory: {self.current_inventory}")
         
             except Exception as e:
@@ -76,6 +76,11 @@ class ExecutionEngine:
                 positions = await self.exchange.fetch_positions([self.strategy.symbol])
                 
                 if len(positions) > 0:
+                    reconciled_inventory = positions[0]['contracts']
+
+                    if reconciled_inventory != self.current_inventory:
+                        print(f"[RECONCILE] Inventory corrected: {self.current_inventory} ->{reconciled_inventory}")
+
                     self.current_inventory = positions[0]['contracts'] if len(positions) > 0 else 0
                     self.unrealized_pnl = positions[0].get('unrealizedPnl', 0.0)
                 else:
@@ -118,6 +123,16 @@ class ExecutionEngine:
         
         print(f"--- Starting Engine on {self.strategy.symbol} ---")
         self.db.init_db()
+
+        # fetch real starting inventory before anything else
+        positions = await self.exchange.fetch_positions([self.strategy.symbol])
+        if len(positions) > 0:
+            self.current_inventory = positions[0]['contracts']
+            print(f"[INIT] Starting inventory: {self.current_inventory}")
+        else:
+            self.current_inventory = 0
+            print(f"[INIT] Starting inventory: 0")
+
         asyncio.create_task(self.log_trades_background_task())
         asyncio.create_task(self.watch_fills_background_task())
         asyncio.create_task(self.update_inventory_background_task())
@@ -129,7 +144,7 @@ class ExecutionEngine:
                 ticker = await self.exchange.watch_ticker(self.strategy.symbol)
                 mid_price = (ticker['bid'] + ticker['ask']) / 2
 
-                if abs(mid_price - self.last_mid_price) >= self.strategy.price_update_threshold:
+                if abs(mid_price - self.last_mid_price) >= self.strategy.price_update_threshold or time.perf_counter() - self.last_update_time > 5:
                     start_time = time.perf_counter()
 
                     # ask the Strategy module for the quotes
@@ -144,12 +159,15 @@ class ExecutionEngine:
                     print(f"Inv: {self.current_inventory} | Mid: {mid_price:.2f} | Skew: {price_skew:.2f}")
                     print(f"Qt: Bid {target_bid:.2f} | Ask {target_ask:.2f}")
 
+                    t1 = time.perf_counter()
                     await asyncio.gather(
                         self.exchange.cancel_all_orders(self.strategy.symbol),
                         self.execute_quotes(target_bid, target_ask)
                     )
-
+                    t2 = time.perf_counter()
+                    print(f"Order placement: {(t2-t1)*1000:.2f}ms")
                     self.last_mid_price = mid_price
+                    self.last_update_time = time.perf_counter()
                     print(f"Execution Latency: {(time.perf_counter() - start_time) * 1000:.2f} ms")
 
         except asyncio.CancelledError:
