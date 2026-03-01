@@ -2,9 +2,9 @@ class InventoryStrategy:
     def __init__(self):
         self.symbol = 'BTC-PERPETUAL'
         self.position_size = 1000
-        self.spread = 0.0002       # 0.02% spread
-        self.max_inventory = 50000
-        self.skew_factor = 0.00005 # price skew per $1 of inventory
+        self.spread = 0.00015       # 0.015% spread
+        self.max_inventory = 5000
+        self.skew_factor = 0.0013 # price skew per $1 of inventory
         self.price_update_threshold = 1.0 # only update quotes if mid-price moves > $1
 
     def calculate_quotes(self, current_inventory, mid_price):
